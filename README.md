@@ -1,0 +1,144 @@
+# SAH Leaf Counting
+
+面向 RiceW3999（水稻／小麦叶尖点标注）的 SAHCC 适配工程。基于 [SAHCC 官方实现](https://github.com/kaijiang77/SAHCC)，保留 VGG16-BN、特征融合解码器、共享卷积分类／回归头，以及间距感知匈牙利匹配。不是 APGCC+SAH，也不是 PET+SAH。
+
+支持中文／空格文件名、512/1024 混合尺寸、空标注、512 裁块训练、原尺寸验证、完整断点恢复、定位指标和整图／滑窗推理。当前只验证了 CPU 合成数据工程链路，尚无 RiceW3999 精度或 L40 显存实测。
+
+## GPUFree 安装
+
+在已有 torch >= 2.3 的环境中运行，不重新安装镜像自带的 torch。无需 torchvision、Lightning、Hydra 或 CUDA 自定义扩展。
+
+```bash
+cd /root/gpufree-data
+git clone https://github.com/xuanpluspro/sah-leaf-counting.git
+cd sah-leaf-counting
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# 已有 uv 时跳过第一行
+python -m pip install uv -i https://mirror.sjtu.edu.cn/pypi/web/simple
+uv pip install --python "$(command -v python)" -r requirements.txt \
+  --index-url https://mirror.sjtu.edu.cn/pypi/web/simple
+```
+
+## 数据和预训练
+
+已有数据可以直接复用，不必移动或复制。默认目录结构：
+
+```text
+data/RiceW3999/
+  JPEGImages/<完整图片名>.jpg 或 .png
+  PointAnnotations/<同名>.txt
+  ImageSets/train.txt
+  ImageSets/val.txt
+pretrained/vgg16_bn-6c64b313.pth
+```
+
+每个标注文件每行 `x y`，单位为原图像素；空文件表示没有叶尖。清单每行是完整文件名主干，不带扩展名；中文和空格完整保留。不能使用按空白切分清单的方式。坐标必须有限且满足 `0 <= x < W, 0 <= y < H`，重复坐标会明确报错。支持 jpg/jpeg/png/bmp/tif/tiff，扩展名大小写兼容。
+
+使用与 PET/P2RLoss 相同的 ImageNet VGG16-BN 权重：
+
+```bash
+cp /root/gpufree-share/vgg16_bn-6c64b313.pth pretrained/
+python check_data.py --data-path /root/gpufree-data/p2rloss/data/RiceW3999 --check-overlap
+```
+
+检查包括图片可读性、配对、点边界、划分 ID 重叠；`--check-overlap` 还检查解码后完全重复图片。不同裁块来自同一原图的潜在泄漏仍需按原图来源审计，不能依靠像素哈希排除。
+
+## 开始训练
+
+```bash
+DATA_PATH=/root/gpufree-data/p2rloss/data/RiceW3999 \
+BATCH_SIZE=32 EPOCHS=50 WORKERS=4 \
+bash train_ricew3999.sh ricew3999_sah_ep50_bs32_run1
+```
+
+使用本仓库 data 下的数据时，可以省略 DATA_PATH。推荐在已安装的 tmux 会话中启动。默认 batch 32 是为你的 48GB 显存设置的起点，并非已测显存保证；OOM 时改为 16，并使用新实验名。可追加 `--amp` 开启 CUDA FP16；默认 FP32。不要运行中途修改训练代码或升级 torch。
+
+| 参数 | 默认值 |
+|---|---|
+| 训练／验证输入 | 每图在线随机一个 512×512 裁块／原尺寸整图 |
+| batch／总 epochs／workers | 32／50／4 |
+| 验证 | 第 5、10、15…轮及最后一轮，batch=1 |
+| 优化器 | AdamW，weight decay=1e-4 |
+| 主干／其余学习率 | 1e-5／1e-4 |
+| 梯度裁剪 | 全局范数 0.1 |
+| StepLR | step_size=3500，gamma=0.1；50 轮内不会衰减 |
+| 参考点 | stride 8，每格 2×2 个点，偏移倍率 100 |
+| 匹配 | SAH，使用 anchor_points；分类／几何代价系数 1／1 |
+| 局部间距 | 最近 4 个其他标注点平均距离，kappa=1.2，alpha_min=0.03 |
+| 损失 | 前景／背景加权 sigmoid BCE：1／0.5；位置平方误差系数 0.0002 |
+| 前景阈值／随机种子 | 0.5／2024 |
+
+局部间距在原始整图点集合上计算，缩放后按完整缩放点集合计算精确距离，再与标注一起筛选裁块；不在裁块内重新寻找邻居，避免边缘处邻居被裁掉而夸大间距。空标注正常训练，单点图使用官方 1 像素间距约定并随缩放调整。不会生成高斯密度图。
+
+随机缩放范围 0.7–1.3，保证短边不小于裁块尺寸；随机水平翻转。512 原图为保证可裁块，实际缩放会限制在不缩小的范围，1024 图则可在完整范围缩放。每轮是每张原图抽取一次裁块，并非遍历该图所有区域。验证不缩放，只补齐到 16 的倍数，并移除原图边界外的预测。没有距离 NMS，以免合并相邻的真实叶尖。
+
+## 断点恢复
+
+同一条命令、同一实验名再次执行，会自动恢复 `output/checkpoint.pth`，不要求再次读取 ImageNet 权重。也可以显式指定：
+
+```bash
+python train.py --data-path /path/RiceW3999 --tag original_tag \
+  --resume exp/original_tag/output/checkpoint.pth
+```
+
+显式恢复时其余训练参数需与原实验相同。保存模型、AdamW、StepLR、AMP scaler、随机状态、最佳结果和数据指纹。每个完整 epoch 后原子保存；断电／OOM 导致当前 epoch 中断时，从上个完整 epoch 重跑。不是 batch 级恢复。总 epochs、匹配器等关键配置变更会拒绝恢复；新实验使用新 tag。batch/workers 改变允许恢复但会警告轨迹变化。
+
+## 输出文件
+
+`exp/<tag>/output/` 包含：
+
+- `checkpoint.pth`：最新完整训练状态，每轮更新。
+- `best_checkpoint.pth`：验证 MAE 最低的完整训练状态，包含一个预测模型；没有教师模型。
+- `config.json`、`resume_config.json`、`train.log`：配置、恢复配置、日志。
+- `train_history.csv`：损失、学习率、训练耗时和 GPU 分配显存峰值。
+- `metrics_history.csv`、`best_metrics.json`：验证历史和最佳验证指标。
+- `evaluation/epoch_XXXX/metrics.json`、`per_image.csv`、`per_source.csv`：协议、逐图结果及来源分组统计。
+
+启动脚本另追加保存 `exp/<tag>/train.log/running.log`。MAE/RMSE 越低越好；Precision、Recall、F1@4/8/16px 越高越好，比例范围 0–1。定位评估最大化容差内一对一匹配数，再最小化距离，汇总全数据集 TP/FP/FN。来源分组按文件名前缀 `__` 之前提取，仅用于分析，不改变训练划分。JSON 指标位于 `metrics` 字段。
+
+## 单独评估和推理
+
+```bash
+python evaluate.py --checkpoint exp/<tag>/output/best_checkpoint.pth \
+  --data-path /root/gpufree-data/p2rloss/data/RiceW3999 --output evaluation/best
+
+python infer.py --checkpoint exp/<tag>/output/best_checkpoint.pth \
+  --input /path/ryegrass --output predictions/ryegrass
+
+# 大图显存不足时：重叠区按中线划归所属块，不做半径去重
+python infer.py --checkpoint exp/<tag>/output/best_checkpoint.pth \
+  --input /path/ryegrass --output predictions/ryegrass_tiles --tile-size 1024 --overlap 64
+```
+
+推理输出每图 xy TXT、含置信度 JSON、标点图片以及 counts.csv。整图与滑窗不保证预测一致，比较模型时固定推理协议。当前 loader 只加载本工程导出的 checkpoint；官方 Lightning `.ckpt` 不能直接使用。
+
+## 匹配器消融
+
+网络结构完全相同，独立新 tag，保持种子／数据／训练轮数等一致：
+
+```bash
+# SAH + 锚点：默认
+bash train_ricew3999.sh sah_anchor
+# 普通匹配 + 锚点：隔离匹配代价影响
+bash train_ricew3999.sh baseline_anchor --matcher baseline --point-source anchor_points --cost-point 0.05
+# 普通匹配 + 预测点：官方普通匹配默认
+bash train_ricew3999.sh baseline_pred --matcher baseline --point-source pred_points --cost-point 0.05
+# SAH + 预测点：检验匹配参考的影响
+bash train_ricew3999.sh sah_pred --point-source pred_points
+```
+
+上述命令默认从本仓库 data 读取；外部数据时同样前置 DATA_PATH。普通匹配默认几何系数 0.05，SAH 默认 1，这是官方两种代价的设置，不能把差异全归于一个权重项；应进一步对固定权重 0.01/0.04/0.05/0.07 做扫描。`--neighbors`、`--kappa`、`--alpha-min` 可独立消融。论文的模块插入实验没有验证 APGCC+SAH，本仓库也不声称已完成该组合。
+
+## 参数量、耗时及测试
+
+```bash
+python benchmark_model.py --checkpoint exp/<tag>/output/best_checkpoint.pth --size 512
+# 可选 FLOPs 分析（fvcore 单独安装，不影响训练）
+uv pip install --python "$(command -v python)" fvcore --index-url https://mirror.sjtu.edu.cn/pypi/web/simple
+python benchmark_model.py --checkpoint exp/<tag>/output/best_checkpoint.pth --size 512 --flops
+python -m unittest discover -s tests -v
+```
+
+基准默认 batch=1、FP32、20 次预热／100 次计时，排除读图、传输、匹配和可视化；报告参数量、latency ms、FPS、CUDA 显存。FLOPs 存在不支持的算子时只报告 counted_gflops，不将其冒充完整 FLOPs。SAH 不参与推理，因此同一网络替换匹配器不会增加推理参数。
+
+出处、改动边界见 [REPRODUCTION.md](REPRODUCTION.md)，许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
