@@ -161,6 +161,8 @@ class PipelineTests(unittest.TestCase):
             report=json.loads((root/'resume/output/best_metrics.json').read_text())
             self.assertIn('rmse',report['metrics'])
             self.assertTrue((root/'resume/output/evaluation/epoch_0002/per_source.csv').is_file())
+            changed=args_for(root,'resume');changed.eval_every=5
+            with patch('train.SAHCC',side_effect=build):train.main(changed)
             changed=args_for(root,'resume');changed.neighbors=3
             with patch('train.SAHCC',side_effect=build):
                 with self.assertRaisesRegex(ValueError,'neighbors'):train.main(changed)

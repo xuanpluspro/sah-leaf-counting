@@ -57,7 +57,7 @@ bash train_ricew3999.sh ricew3999_sah_ep50_bs32_run1
 |---|---|
 | 训练／验证输入 | 每图在线随机一个 512×512 裁块／原尺寸整图 |
 | batch／总 epochs／workers | 32／50／4 |
-| 验证 | 第 5、10、15…轮及最后一轮，batch=1 |
+| 验证 | 每个完整 epoch，batch=1（VAL_EVERY 默认 1） |
 | 优化器 | AdamW，weight decay=1e-4 |
 | 主干／其余学习率 | 1e-5／1e-4 |
 | 梯度裁剪 | 全局范数 0.1 |
@@ -142,3 +142,6 @@ python -m unittest discover -s tests -v
 基准默认 batch=1、FP32、20 次预热／100 次计时，排除读图、传输、匹配和可视化；报告参数量、latency ms、FPS、CUDA 显存。FLOPs 存在不支持的算子时只报告 counted_gflops，不将其冒充完整 FLOPs。SAH 不参与推理，因此同一网络替换匹配器不会增加推理参数。
 
 出处、改动边界见 [REPRODUCTION.md](REPRODUCTION.md)，许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
+
+验证间隔可通过 `VAL_EVERY`／`--eval-every` 覆盖，旧检查点恢复时允许切换并记录日志，不会补评估历史轮次。切换频率可能改变随机数消耗和后续训练轨迹。
