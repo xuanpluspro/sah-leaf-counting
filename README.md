@@ -38,10 +38,10 @@ pretrained/vgg16_bn-6c64b313.pth
 
 ```bash
 cp /root/gpufree-share/vgg16_bn-6c64b313.pth pretrained/
-python check_data.py --data-path /root/gpufree-data/p2rloss/data/RiceW3999 --check-overlap
+python check_data.py --data-path /root/gpufree-data/p2rloss/data/RiceW3999
 ```
 
-检查包括图片可读性、配对、点边界、划分 ID 重叠；`--check-overlap` 还检查解码后完全重复图片。不同裁块来自同一原图的潜在泄漏仍需按原图来源审计，不能依靠像素哈希排除。
+快速检查包括图片头可读性、配对、点边界、划分 ID 重叠；`--check-overlap` 还检查解码后完全重复图片。不同裁块来自同一原图的潜在泄漏仍需按原图来源审计，不能依靠像素哈希排除。
 
 ## 开始训练
 
@@ -145,3 +145,23 @@ python -m unittest discover -s tests -v
 
 
 验证间隔可通过 `VAL_EVERY`／`--eval-every` 覆盖，旧检查点恢复时允许切换并记录日志，不会补评估历史轮次。切换频率可能改变随机数消耗和后续训练轨迹。
+
+
+## 快速数据检查（RiceW3999 / VOC 点标注）
+
+```bash
+python check_data.py --data-path data/RiceW3999                 # 默认快速检查
+python check_data.py --data-path data/RiceW3999 --decode        # 完整解码，检查像素损坏
+python check_data.py --data-path data/RiceW3999 --check-overlap # 完整解码并按像素查重
+```
+
+快速模式只读取图片头中的尺寸及全部标注，检查配对、完整中文/空格 ID、重复 ID、坐标有限性/边界和 train/val/test ID 重叠。
+不读取全部像素，因此不能保证发现图像数据区损坏；完整检查需加 `--decode`。
+`--check-overlap` 比较解码后 RGB 像素，不能排除来自同一原图的不同重叠裁块泄漏。
+JSON 仍包含图片数、点数、空标注数和尺寸统计，进度写入 stderr，`--no-progress` 可关闭。
+检查仅依赖 Pillow 和 Python 标准库，不导入训练模型/PyTorch；有 tqdm 时显示进度条，没有时输出计数进度。
+脚本只读，不去重、不删改数据，也不会自动加入每轮训练。只适用于 JPEGImages/PointAnnotations/ImageSets 点标注目录，不替代原始 SHHA 等格式的预处理。
+本次每仓库 9 项针对性数据检查测试通过；未重跑模型训练测试。
+
+SAH 保留训练 float32 精度下的重复坐标检查，错误会显示具体文件及行号；检查阶段无需计算 kNN。训练时的局部间距计算未改变。
+
