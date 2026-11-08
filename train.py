@@ -41,6 +41,7 @@ def parser():
     p.add_argument('--weight-decay', type=float, default=1e-4)
     p.add_argument('--clip-grad', type=float, default=.1)
     p.add_argument('--point-weight', type=float, default=.0002)
+    p.add_argument('--directional-detail', action='store_true', help='Enable the directional detail gate before C4/C5 fusion')
     p.add_argument('--matcher', choices=['sah','baseline'], default='sah')
     p.add_argument('--point-source', choices=['anchor_points','pred_points'], default='anchor_points')
     p.add_argument('--neighbors', type=int, default=4, help='k nearest other GT points for spacing')
@@ -103,7 +104,7 @@ def main(args):
     state = checkpointing.load(resume) if resume else None
     # Full checkpoint already contains the backbone: no pretrained dependency on resume.
     pretrained = None if state or args.scratch else args.pretrained
-    model = SAHCC(ModelConfig(), pretrained).to(device)
+    model = SAHCC(ModelConfig(directional_detail=args.directional_detail), pretrained).to(device)
     criterion = PointCriterion(args).to(device)
     optimizer = torch.optim.AdamW([
         dict(params=[p for n,p in model.named_parameters() if not n.startswith('backbone.')]),
@@ -141,7 +142,7 @@ def main(args):
         (output/'resume_config.json').write_text(json.dumps(config, indent=2)+'\n')
     logger.info(f'Train={len(training)} val={len(validation)} | patch={args.patch_size} | '
                 f'Params={sum(p.numel() for p in model.parameters())/1e6:.2f}M | '
-                f'matcher={args.matcher} source={args.point_source} | {config["precision"]}')
+                f'directional_detail={args.directional_detail} | matcher={args.matcher} source={args.point_source} | {config["precision"]}')
     if start >= args.epochs:
         logger.info('Requested total epochs already completed')
         return

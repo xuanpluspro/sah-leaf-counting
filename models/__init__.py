@@ -13,9 +13,13 @@ class ModelConfig:
     decoder_out_channels: int = 256
     anchor_pyramid_level: int = 3
     offset_scale: float = 100.
+    directional_detail: bool = False
 
     def to_dict(self):
-        return asdict(self)
+        result = asdict(self)
+        if not self.directional_detail:
+            result.pop("directional_detail")  # Retain legacy checkpoint config.
+        return result
 
 
 class SAHCC(P2PNet):

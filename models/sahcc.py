@@ -63,18 +63,37 @@ class AnchorPoints(nn.Module):
         return self._cache[key].unsqueeze(0).expand(b, -1, -1)
 
 
+class DirectionalDetailGate(nn.Module):
+    """Learn a spatial gain from horizontal and vertical detail responses."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.horizontal = nn.Conv2d(channels, channels, (1, 5), padding=(0, 2),
+                                    groups=channels, bias=False)
+        self.vertical = nn.Conv2d(channels, channels, (5, 1), padding=(2, 0),
+                                  groups=channels, bias=False)
+        self.project = nn.Conv2d(channels, 1, 1)
+        nn.init.zeros_(self.project.weight)
+        nn.init.zeros_(self.project.bias)
+
+    def forward(self, detail: torch.Tensor):
+        response = self.horizontal(detail).abs() + self.vertical(detail).abs()
+        return detail * (2.0 * torch.sigmoid(self.project(response)))
+
+
 class Decoder(nn.Module):
     def __init__(self, c4: int = 512, c5: int = 512, out_channels: int = 256):
         super().__init__()
         self.p5_1 = nn.Conv2d(c5, out_channels, kernel_size=1)
         self.p4_1 = nn.Conv2d(c4, out_channels, kernel_size=1)
+        self.detail_gate = nn.Identity()
         self.up = nn.Upsample(scale_factor=2, mode="nearest")
         self.p4_2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
 
     def forward(self, feats):
         c4, c5 = feats[2], feats[3]
         p5 = self.p5_1(c5)
-        return self.p4_2(self.p4_1(c4) + self.up(p5))
+        return self.p4_2(self.detail_gate(self.p4_1(c4)) + self.up(p5))
 
 
 class P2PNet(nn.Module):
@@ -90,6 +109,7 @@ class P2PNet(nn.Module):
         decoder_out_channels: int = 256,
         anchor_pyramid_level: int = 3,
         offset_scale: float = 100.0,
+        directional_detail: bool = False,
     ):
         super().__init__()
         self.backbone = backbone
@@ -103,6 +123,10 @@ class P2PNet(nn.Module):
             offset_scale=offset_scale,
         )
         self.anchor_points = AnchorPoints(pyramid_level=anchor_pyramid_level, row=row, line=line)
+
+        if directional_detail:
+            with torch.random.fork_rng(devices=[]):
+                self.decoder.detail_gate = DirectionalDetailGate(decoder_out_channels)
 
     def forward(self, samples: torch.Tensor):
         feats = self.backbone(samples)
